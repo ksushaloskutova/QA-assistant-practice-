@@ -1,0 +1,12 @@
+# requirements-dev.txt
+
+# Основные зависимости для тестов и разработки
+pytest>=7.0
+pytest-cov>=4.0
+flake8
+mypy
+black
+
+# Для удобного автопоиска фикстур и тестов
+types-PyYAML
+types-setuptools
