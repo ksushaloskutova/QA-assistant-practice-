@@ -7,7 +7,8 @@ from app import ingest                            # импортируем тв�
 
 # --- Пути к тестовым файлам и БД ---
 TEST_DOC_PATH = "app/docs/test_doc.txt"           # путь к тестовому .txt файлу
-TEST_CHROMA_PATH = ingest.CHROMA_PATH             # путь к Chroma БД (такой же как в ingest.py)
+TEST_QDRANT_PATH = ingest.QDRANT_PATH
+TEST_QDRANT_COLLECTION = ingest.COLLECTION_NAME
 
 def test_load_documents():
     docs = ingest.load_documents()                # вызываем функцию загрузки
@@ -23,15 +24,20 @@ def test_split_text(method):
     assert len(chunks) > 0                        # список не пуст
     assert isinstance(chunks[0], Document)        # элементы списка — это Document
 
-def test_save_to_chroma():
-    docs = ingest.load_documents()                 # загружаем документы
-    chunks = ingest.split_text(docs, method="token")  # разбиваем по токенам
-    ingest.save_to_chroma(chunks)                  # сохраняем в Chroma
+def test_save_to_qdrant():
+    docs = ingest.load_documents()
+    chunks = ingest.split_text(docs, method="token")
 
-    assert os.path.exists(TEST_CHROMA_PATH)        # проверяем, что папка Chroma появилась
-    assert any(os.scandir(TEST_CHROMA_PATH))       # и что она не пуста
+    # Сохраняем в Qdrant
+    ingest.save_to_qdrant(chunks)
 
-    shutil.rmtree(TEST_CHROMA_PATH)                # очищаем Chroma после теста
+    # Проверяем, что база действительно создана
+    assert os.path.exists(TEST_QDRANT_PATH), "Qdrant path не существует"
+    assert any(os.scandir(TEST_QDRANT_PATH)), "Qdrant база пуста"
+
+    # Удаляем после теста
+    shutil.rmtree(TEST_QDRANT_PATH)
+
 
 
 # --- Тест на пустой список документов ---

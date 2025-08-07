@@ -1,97 +1,125 @@
-# Langchain dependencies
-import hashlib                         # стандартный модуль для подсчёта SHA-256 хэша
-import os                              # работа с файловой системой (пути, обход)
-import shutil                          # высокоуровневые операции с файлами/директориями
+import hashlib
+import os
 
-from langchain_community.document_loaders import TextLoader           # загрузка .txt → Document
-from langchain.text_splitter import MarkdownTextSplitter              # (не используется здесь) — разрезание markdown по структуре
-from langchain.schema import Document                                 # тип Document (содержит текст и метаданные)
-from langchain_community.vectorstores import Chroma                   # векторная БД Chroma (локальная)
-from langchain_huggingface import HuggingFaceEmbeddings               # эмбеддер на основе модели HuggingFace
+from langchain_community.document_loaders import TextLoader
+from langchain.schema import Document
+from langchain_qdrant import Qdrant
+from contextlib import closing
 
-from langchain_text_splitters import (                                # импорт различных вариантов чанкеров
+from app.objects.model_custom_embeddings import E5Embeddings
+
+from chonkie import (
     TokenChunker, SentenceChunker, RecursiveChunker,
     RecursiveRules, SemanticChunker, SDPMChunker, LateChunker
 )
 
-# === Модель эмбеддингов (E5) ===
-embedding_model = HuggingFaceEmbeddings(
-    model_name="intfloat/multilingual-e5-large",                      # название модели из Hugging Face
-    model_kwargs={"device": "cuda"},                                  # устройство (cuda/gpu или cpu)
-    encode_kwargs={"prompt": "passage: "},                            # промпт для документов
-    query_encode_kwargs={"prompt": "query: "}                         # промпт для запросов
+# === Константы ===
+DATA_PATH = "app/docs"
+QDRANT_PATH = "app/qdrant_db"
+COLLECTION_NAME = "qa_documents"
+global_unique_hashes = set()
+
+embedding_model = E5Embeddings(
+    model_name="intfloat/multilingual-e5-large",
+    device="cpu"
 )
+from qdrant_client import QdrantClient
 
-# Path to the directory to save Chroma database
-CHROMA_PATH = "app/db_metadata_v5"      # папка, куда будет сохранён Chroma-индекс
-DATA_PATH = "app/docs"                  # папка с исходными очищенными .txt
-global_unique_hashes = set()           # глобальный набор хэшей для дедупликации чанков
 
-# === Варианты чанкеров ===
+
+# === Чанкеры ===
 def get_chunker(method: str):
-    if method == "token":                                                    # чанкер по токенам
+    if method == "token":
         return TokenChunker(tokenizer="gpt2", chunk_size=512, chunk_overlap=64)
-    elif method == "sentence":                                               # чанкер по предложениям
+    elif method == "sentence":
         return SentenceChunker(chunk_size=10, chunk_overlap=2)
-    elif method == "recursive":                                              # recursive по символам (заголовки, параграфы, строки)
+    elif method == "recursive":
         return RecursiveChunker(chunk_size=500, chunk_overlap=100)
-    elif method == "rules":                                                 # правила на основе структуры текста (MD, заголовки и т.д.)
+    elif method == "rules":
         return RecursiveRules(chunk_size=500, chunk_overlap=100)
-    elif method == "semantic":                                              # семантическое разбиение на основе эмбеддингов
-        return SemanticChunker(embedding_model)
-    elif method == "sdpm":                                                  # семантический декомпозитор (структурная декомпозиция)
-        return SDPMChunker(embedding_model)
-    elif method == "late":                                                  # "поздний" семантический чанкер (после линейной нарезки)
-        return LateChunker(embedding_model)
     else:
-        raise ValueError(f"Unknown chunking method: {method}")              # если передан неизвестный метод — ошибка
+        raise ValueError(f"Unknown chunking method: {method}")
 
-# Функция обхода папок и поиска .txt файлов
+# === Загрузка документов ===
 def walk_through_files(path, file_extension='.txt'):
-    for (dir_path, dir_names, filenames) in os.walk(path):                 # рекурсивно обходим каталог
+    for dir_path, _, filenames in os.walk(path):
         for filename in filenames:
-            if filename.endswith(file_extension):                          # фильтрация по расширению
-                yield os.path.join(dir_path, filename)                     # возвращаем полный путь к файлу
+            if filename.endswith(file_extension):
+                yield os.path.join(dir_path, filename)
 
-# Загрузка всех документов из указанной папки
 def load_documents():
-    """
-    Загрузить все .txt из DATA_PATH и превратить в LangChain-Document.
-    Возврат: список Document.
-    """
-    documents = []                                                         # итоговый список документов
-    for f_name in walk_through_files(DATA_PATH):                           # перебираем все файлы
-        document_loader = TextLoader(f_name, encoding="utf-8")             # создаём загрузчик
-        documents.extend(document_loader.load())                           # загружаем документы и добавляем в список
-    return documents                                                       # возвращаем все документы
+    documents = []
+    for f_name in walk_through_files(DATA_PATH):
+        loader = TextLoader(f_name, encoding="utf-8")
+        loaded = loader.load()
+        for doc in loaded:
+            print(f"[LOADED] {f_name} - {len(doc.page_content)} chars")
+        documents.extend(loaded)
+    return documents
 
-# Получение хэша для проверки уникальности чанка
-def hash_text(text):
-    hash_object = hashlib.sha256(text.encode())                            # вычисляем SHA256
-    return hash_object.hexdigest()                                         # возвращаем hex-строку
+# === Хэш текста ===
+def hash_text(text: str):
+    return hashlib.sha256(text.encode()).hexdigest()
 
-# Разделение документов на чанки и удаление дубликатов
+# === Разбиение на чанки ===
 def split_text(documents: list[Document], method: str):
-    splitter = get_chunker(method)                                         # получаем нужный чанкер
-    chunks = splitter.chunk_documents(documents)                           # применяем разбиение
+    splitter = get_chunker(method)
+    chunks = []
+    for doc in documents:
+        raw_chunks = splitter.chunk(f"passage: {doc.page_content}")
+        for chunk_text in raw_chunks:
+            chunk_hash = hash_text(chunk_text.text)
+            if chunk_hash not in global_unique_hashes:
+                chunks.append(Document(page_content=chunk_text.text, metadata=doc.metadata))
+                global_unique_hashes.add(chunk_hash)
+    print(f"Split {len(documents)} documents → {len(chunks)} unique chunks using '{method}' splitter.")
+    return chunks
 
-    unique_chunks = []                                                     # список для уникальных чанков
-    for chunk in chunks:
-        chunk_hash = hash_text(chunk.page_content)                         # хэшируем содержимое
-        if chunk_hash not in global_unique_hashes:                         # проверяем на дубликат
-            unique_chunks.append(chunk)                                    # добавляем в список
-            global_unique_hashes.add(chunk_hash)                           # сохраняем хэш
+# === Сохранение в Qdrant ===
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+import uuid
 
-    print(f"Split {len(documents)} documents → {len(unique_chunks)} unique chunks using '{method}' splitter.")
-    return unique_chunks                                                   # возвращаем уникальные чанки
+def save_to_qdrant(chunks: list[Document]):
+    # Настройка клиента в локальном режиме
+    client = QdrantClient(path=QDRANT_PATH)
 
-# === Сохранение в Chroma ===
-def save_to_chroma(chunks: list[Document]):
-    if os.path.exists(CHROMA_PATH):                                        # если папка с БД уже существует
-        shutil.rmtree(CHROMA_PATH)                                         # удаляем её
-    db = Chroma.from_documents(                                            # создаём Chroma БД
-        documents=chunks,                                                  # список чанков
-        embedding=embedding_model,                                         # эмбеддер
-        persist_directory=CHROMA_PATH                                      # путь для хранения
-    )
-    db.persist()
+    # Создание коллекции (если нет)
+    if not client.collection_exists(collection_name=COLLECTION_NAME):
+        client.create_collection(
+            collection_name=COLLECTION_NAME,
+            vectors_config=VectorParams(
+                size=embedding_model.dim,  # размерность вектора
+                distance=Distance.COSINE
+            )
+        )
+
+    # Подготовка данных
+    points = []
+    for doc in chunks:
+        vector = embedding_model.embed_query(doc.page_content)
+        point = PointStruct(
+            id=str(uuid.uuid4()),
+            vector=vector,
+            payload=doc.metadata | {"text": doc.page_content}
+        )
+        points.append(point)
+
+    # Запись в коллекцию
+    client.upsert(collection_name=COLLECTION_NAME, points=points)
+
+    print(f"Saved {len(points)} chunks to Qdrant at {QDRANT_PATH} (collection: {COLLECTION_NAME})")
+
+
+def generate_data_store(chunk_method="token"):
+    print("Загрузка документов...")
+    documents = load_documents()
+
+    print("Нарезка на чанки...")
+    chunks = split_text(documents, method=chunk_method)
+
+    print("Сохранение в Qdrant...")
+    save_to_qdrant(chunks)
+
+if __name__ == "__main__":
+    generate_data_store(chunk_method="token")
