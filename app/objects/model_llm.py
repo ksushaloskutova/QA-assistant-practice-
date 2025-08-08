@@ -1,6 +1,8 @@
-from transformers import pipeline
-import torch
 import os
+
+import torch
+from transformers import pipeline
+
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 
@@ -12,5 +14,5 @@ generation_pipeline = pipeline(
     "text-generation",
     model="RefalMachine/ruadapt_qwen2.5_3B_ext_u48_instruct_v4",
     device=device,
-    torch_dtype=torch.float16
+    torch_dtype=torch.float16,
 )
