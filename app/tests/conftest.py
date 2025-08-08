@@ -1,11 +1,12 @@
 # tests/conftest.py
 import os
 import shutil
+import textwrap
 
 import pytest
+from langchain.schema import Document
 
-# путь подстрой под свой проект:
-from app.providers import ingest
+from app.providers import ingest, scapper
 
 
 @pytest.fixture(autouse=True)
@@ -63,3 +64,51 @@ def qdrant_cleanup():
     yield
     if os.path.exists(path):
         shutil.rmtree(path)
+
+
+class FakeAsyncHtmlLoader:
+    """
+    Полностью офлайн-замена AsyncHtmlLoader.
+    Возвращает два HTML-документа с "мусорными" блоками и полезным контентом.
+    """
+
+    def __init__(self, links):
+        self.links = links
+
+    def load(self):
+        html1 = textwrap.dedent(
+            """
+            <html><body>
+              <div class="main-header">HEADER TO DROP</div>
+              <div>Полезный текст №1</div>
+              <div class="blog-article-menu">MENU TO DROP</div>
+            </body></html>
+            """
+        )
+        html2 = textwrap.dedent(
+            """
+            <html><body>
+              <div class="breadcrumbs">BREADCRUMBS TO DROP</div>
+              <p>Полезный текст №2 с <a href="http://example.com">ссылкой</a> и <img src="x.jpg"/></p>
+              <div class="new-footer">FOOTER TO DROP</div>
+            </body></html>
+            """
+        )
+        return [Document(page_content=html1), Document(page_content=html2)]
+
+
+@pytest.fixture(autouse=True)
+def patch_constants_and_loader(tmp_path, monkeypatch):
+    """
+    - Подменяем пути FILE_TO_PARSE и DIR_TO_STORE на временные (tmp_path).
+    - Подменяем AsyncHtmlLoader на FakeAsyncHtmlLoader.
+    """
+    links_file = tmp_path / "links.txt"
+    out_dir = tmp_path / "docs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(scapper, "FILE_TO_PARSE", str(links_file))
+    monkeypatch.setattr(scapper, "DIR_TO_STORE", str(out_dir))
+    monkeypatch.setattr(scapper, "AsyncHtmlLoader", FakeAsyncHtmlLoader)
+
+    return {"links_file": links_file, "out_dir": out_dir}
