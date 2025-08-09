@@ -19,7 +19,8 @@ COLLECTION_NAME = "qa_documents"
 global_unique_hashes = set()
 
 embedding_model = E5Embeddings(
-    model_name="intfloat/multilingual-e5-large", device="cpu"
+    model_name=os.getenv("EMBEDDINGS_MODEL_NAME", "intfloat/multilingual-e5-base"),
+    device="cpu",
 )
 
 

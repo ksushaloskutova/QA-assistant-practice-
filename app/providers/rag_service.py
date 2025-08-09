@@ -181,8 +181,11 @@ def initialize_components():
     _llm = HuggingFacePipeline(pipeline=_gen)
 
     print("[INIT] Embeddings (E5)...")
+    embedding_model_name = os.getenv(
+        "EMBEDDINGS_MODEL_NAME", "intfloat/multilingual-e5-base"
+    )
     _embedding_model = E5Embeddings(
-        model_name="intfloat/multilingual-e5-large",
+        model_name=embedding_model_name,
         device="cpu",
     )
 
