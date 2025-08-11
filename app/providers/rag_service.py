@@ -27,13 +27,9 @@ MODEL_DIR = "app/models/my_model"  # локальная HF-модель гене
 QDRANT_PATH = os.path.abspath("app/qdrant_db")  # локальная папка Qdrant
 COLLECTION_NAME = "qa_documents"  # коллекция, созданная ingest
 
-TOP_K_DOCS = 2  # финальное кол-во чанков в контексте
-FETCH_K = 8  # сколько кандидатов тянем для отбора
-SCORE_THRESHOLD = 0.25  # порог отсечения нерелевантного (подбирается)
 PER_DOC_LIMIT = 400  # лимит токенов на 1 документ до склейки
 MAX_INPUT_TOKENS = 800  # суммарный лимит токенов контекста
 MAX_NEW_TOKENS = 160  # длина ответа (для скорости)
-MMR_LAMBDA = 0.5  # диверсификация MMR (0..1)
 
 # ==================== ГЛОБАЛ ====================
 _initialized = False
@@ -49,6 +45,17 @@ _chat_history: Dict[str, List[Union[HumanMessage, AIMessage]]] = {}
 
 
 # ==================== ВСПОМОГАЛКИ ====================
+def _rag_params() -> dict:
+    """Читает настройки RAG из переменных окружения на каждый запуск."""
+    return {
+        "TOP_K_DOCS": int(os.getenv("RAG_TOP_K_DOCS", "2")),
+        "FETCH_K": int(os.getenv("RAG_FETCH_K", "8")),
+        "SCORE_THRESHOLD": float(os.getenv("RAG_SCORE_THRESHOLD", "0.25")),
+        "MMR_LAMBDA": float(os.getenv("RAG_MMR_LAMBDA", "0.5")),
+        "HNSW_EF": int(os.getenv("RAG_HNSW_EF", "4")),
+    }
+
+
 def _parallel_embed(texts: List[str]) -> List[List[float]]:
     """Параллельное вычисление эмбеддингов"""
     return _embedding_model.embed_documents(texts)
@@ -220,7 +227,7 @@ def initialize_components():
 def query_rag(message: ChatMessage, session_id: str = "") -> str:
     """
     Оптимизированный RAG на CPU:
-      1) извлекаем кандидатов (FETCH_K) с фильтрацией по score
+      1) извлекаем кандидатов (fetch_k) с фильтрацией по score
       2) fallback на MMR если нет результатов
       3) обрезаем документы и собираем контекст
       4) генерируем ответ с кэшированием промптов
@@ -237,14 +244,16 @@ def query_rag(message: ChatMessage, session_id: str = "") -> str:
     t0 = time.perf_counter()
     timers = {}  # Для детального замера времени
 
+    params = _rag_params()
+
     # 1) Поиск документов с оптимизированными параметрами
     search_start = time.perf_counter()
     scored = _vectorstore.similarity_search_with_score(
         message.question,
-        k=FETCH_K,
-        score_threshold=SCORE_THRESHOLD,
+        k=params["FETCH_K"],
+        score_threshold=params["SCORE_THRESHOLD"],
         search_params={
-            "hnsw_ef": 32,  # ИСПРАВЛЕНО: Уменьшено для скорости
+            "hnsw_ef": params["HNSW_EF"],
             "exact": False,
         },
     )
@@ -252,32 +261,34 @@ def query_rag(message: ChatMessage, session_id: str = "") -> str:
 
     # 2) Фильтрация и fallback логика
     filter_start = time.perf_counter()
-    filtered_docs = [d for d, s in scored if s >= SCORE_THRESHOLD]
+    filtered_docs = [d for d, s in scored if s >= params["SCORE_THRESHOLD"]]
 
     if not filtered_docs:
         # ИСПРАВЛЕНО: Добавлен таймаут для MMR
         try:
             docs = _vectorstore.max_marginal_relevance_search(
                 message.question,
-                k=TOP_K_DOCS,
-                fetch_k=FETCH_K,
-                lambda_mult=MMR_LAMBDA,
+                k=params["TOP_K_DOCS"],
+                fetch_k=params["FETCH_K"],
+                lambda_mult=params["MMR_LAMBDA"],
                 timeout=5.0,  # Максимум 5 секунд на MMR
             )
         except Exception:
             docs = []
     else:
-        docs = filtered_docs[:TOP_K_DOCS]
+        docs = filtered_docs[: params["TOP_K_DOCS"]]
     timers["filter"] = time.perf_counter() - filter_start
 
     # 3) Подготовка контекста
     trim_start = time.perf_counter()
+    trimmed_docs = []
     try:
-        # ИСПРАВЛЕНО: Параллельная обрезка документов
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            docs = list(executor.map(_trim_per_doc, docs))
+        # ИСПРАВЛЕНО: Параллельная обрезка документов через глобальный executor
+        docs_copy = list(docs)
+        # trimmed_docs = list(_EXECUTOR.map(_trim_per_doc, docs_copy)) - ВРЕМЕННО!
+        trimmed_docs = list(map(_trim_per_doc, docs_copy))
 
-        context_text = _trim_docs_by_tokens(docs, MAX_INPUT_TOKENS)
+        context_text = _trim_docs_by_tokens(trimmed_docs, MAX_INPUT_TOKENS)
         history_text = _hist_to_text(_chat_history[session_id], max_pairs=2)
     except Exception as e:
         logger.error(f"Context preparation failed: {str(e)}")
@@ -296,7 +307,7 @@ def query_rag(message: ChatMessage, session_id: str = "") -> str:
 
         # ИСПРАВЛЕНО: Добавлены источники только если есть ответ
         if answer:
-            answer += _format_sources(docs)
+            answer += _format_sources(trimmed_docs)
     except Exception as e:
         logger.error(f"Generation failed: {str(e)}")
         answer = "Извините, не удалось обработать запрос. Пожалуйста, попробуйте позже."

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.models.index import ChatMessage
-from app.providers.rag_service import initialize_components, query_rag
+from app.providers.rag_service import _EXECUTOR, initialize_components, query_rag
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,12 @@ app.add_middleware(
 async def startup_event():
     """Инициализация при старте приложения"""
     initialize_components()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Корректное завершение ресурсов при остановке приложения"""
+    _EXECUTOR.shutdown(wait=True)
 
 
 @app.get("/")

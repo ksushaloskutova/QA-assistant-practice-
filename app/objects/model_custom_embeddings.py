@@ -1,5 +1,5 @@
-from typing import List
 import os
+from typing import List
 
 import torch
 from langchain_core.embeddings import Embeddings
@@ -14,7 +14,7 @@ class E5Embeddings(Embeddings):
 
     def __init__(
         self,
-        model_name: str | None = None,
+        model_name: str = None,
         device: str = "cpu",
         query_prefix: str = "query: ",
         passage_prefix: str = "passage: ",
@@ -34,16 +34,12 @@ class E5Embeddings(Embeddings):
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         prompts = [self.passage_prefix + text for text in texts]
-        return (
-            self.model.encode(
-                prompts, convert_to_numpy=True, normalize_embeddings=True
-            ).tolist()
-        )
+        return self.model.encode(
+            prompts, convert_to_numpy=True, normalize_embeddings=True
+        ).tolist()
 
     def embed_query(self, text: str) -> List[float]:
         prompt = self.query_prefix + text
-        return (
-            self.model.encode(
-                prompt, convert_to_numpy=True, normalize_embeddings=True
-            ).tolist()
-        )
+        return self.model.encode(
+            prompt, convert_to_numpy=True, normalize_embeddings=True
+        ).tolist()
