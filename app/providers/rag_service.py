@@ -154,29 +154,34 @@ def _format_sources(docs: List[Document]) -> str:
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
 def initialize_components():
-    """Инициализация всех тяжёлых частей один раз (CPU)."""
+    """Инициализация всех тяжёлых частей один раз (CPU или GPU)."""
     global _initialized, _client, _vectorstore, _embedding_model, _llm, _TOKENIZER
     if _initialized:
         return
 
-    # умерим жадность по потокам
+    # умерим жадность по потокам только на CPU
     try:
-        torch.set_num_threads(min(4, os.cpu_count() or 4))
+        if not torch.cuda.is_available():
+            torch.set_num_threads(min(4, os.cpu_count() or 4))
     except Exception:
         pass
 
     print("[INIT] Tokenizer...")
     _TOKENIZER = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
 
-    print("[INIT] LLM (HF pipeline, CPU)...")
+    device = 0 if torch.cuda.is_available() else -1
+    device_name = "GPU" if device >= 0 else "CPU"
+    print(f"[INIT] LLM (HF pipeline, {device_name})...")
+    if device >= 0:
+        torch.backends.cudnn.benchmark = True
     _gen = pipeline(
         "text-generation",
         model=MODEL_DIR,
         tokenizer=MODEL_DIR,
-        device=-1,  # CPU
-        torch_dtype=torch.float32,  # Явное указание типа
+        device=device,
+        torch_dtype=torch.float16 if device >= 0 else torch.float32,
         model_kwargs={
-            "low_cpu_mem_usage": True,
+            "low_cpu_mem_usage": device < 0,
             "use_cache": True,  # Включить кэширование внимания
         },
         do_sample=False,
@@ -193,7 +198,7 @@ def initialize_components():
     )
     _embedding_model = E5Embeddings(
         model_name=embedding_model_name,
-        device="cpu",
+        device="cuda" if torch.cuda.is_available() else "cpu",
     )
 
     print("[INIT] Qdrant client (local path)...")
@@ -226,7 +231,7 @@ def initialize_components():
 # ==================== ЗАПРОС ====================
 def query_rag(message: ChatMessage, session_id: str = "") -> str:
     """
-    Оптимизированный RAG на CPU:
+    Оптимизированный RAG (CPU, использует GPU при наличии):
       1) извлекаем кандидатов (fetch_k) с фильтрацией по score
       2) fallback на MMR если нет результатов
       3) обрезаем документы и собираем контекст

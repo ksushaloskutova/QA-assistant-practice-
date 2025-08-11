@@ -14,8 +14,8 @@ class E5Embeddings(Embeddings):
 
     def __init__(
         self,
-        model_name: str = None,
-        device: str = "cpu",
+        model_name: str | None = None,
+        device: str | None = None,
         query_prefix: str = "query: ",
         passage_prefix: str = "passage: ",
     ):
@@ -23,6 +23,11 @@ class E5Embeddings(Embeddings):
             model_name = os.getenv(
                 "EMBEDDINGS_MODEL_NAME", "intfloat/multilingual-e5-base"
             )
+
+        if device is None:
+            # Используем GPU, если он доступен
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
         self.model = SentenceTransformer(model_name_or_path=model_name, device=device)
         try:
             self.model = self.model.to(dtype=torch.float16)
