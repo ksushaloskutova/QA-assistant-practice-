@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_huggingface import HuggingFacePipeline
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
-from transformers import AutoTokenizer, pipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 from app.objects.model_custom_embeddings import E5Embeddings
 
@@ -23,7 +23,10 @@ logger = logging.getLogger(__name__)
 
 
 # ==================== КОНФИГ ====================
-MODEL_DIR = "app/models/my_model"  # локальная HF-модель генерации
+# Имя/путь модели и токенизатора можно переопределить через env.
+MODEL_NAME = os.getenv("LLM_MODEL_NAME", "microsoft/phi-2")
+TOKENIZER_NAME = os.getenv("LLM_TOKENIZER_NAME", MODEL_NAME)
+QUANTIZATION = os.getenv("LLM_QUANTIZATION", "8bit")  # 4bit/8bit/none
 QDRANT_PATH = os.path.abspath("app/qdrant_db")  # локальная папка Qdrant
 COLLECTION_NAME = "qa_documents"  # коллекция, созданная ingest
 
@@ -32,7 +35,7 @@ FETCH_K = 8  # сколько кандидатов тянем для отбор�
 SCORE_THRESHOLD = 0.25  # порог отсечения нерелевантного (подбирается)
 PER_DOC_LIMIT = 400  # лимит токенов на 1 документ до склейки
 MAX_INPUT_TOKENS = 800  # суммарный лимит токенов контекста
-MAX_NEW_TOKENS = 160  # длина ответа (для скорости)
+MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "160"))
 MMR_LAMBDA = 0.5  # диверсификация MMR (0..1)
 
 # ==================== ГЛОБАЛ ====================
@@ -159,26 +162,55 @@ def initialize_components():
         pass
 
     print("[INIT] Tokenizer...")
-    _TOKENIZER = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
-
-    print("[INIT] LLM (HF pipeline, CPU)...")
-    _gen = pipeline(
-        "text-generation",
-        model=MODEL_DIR,
-        tokenizer=MODEL_DIR,
-        device=-1,  # CPU
-        torch_dtype=torch.float32,  # Явное указание типа
-        model_kwargs={
-            "low_cpu_mem_usage": True,
-            "use_cache": True,  # Включить кэширование внимания
-        },
-        do_sample=False,
-        temperature=0.0,
-        top_p=1.0,
-        max_new_tokens=MAX_NEW_TOKENS,
-        return_full_text=False,
+    _TOKENIZER = AutoTokenizer.from_pretrained(
+        TOKENIZER_NAME, trust_remote_code=True
     )
-    _llm = HuggingFacePipeline(pipeline=_gen)
+
+    print("[INIT] LLM (quantized)...")
+    if MODEL_NAME.endswith(".gguf"):
+        from langchain_community.llms import LlamaCpp
+
+        _llm = LlamaCpp(
+            model_path=MODEL_NAME,
+            n_ctx=MAX_INPUT_TOKENS,
+            temperature=0.0,
+            max_tokens=MAX_NEW_TOKENS,
+        )
+    else:
+        model_kwargs = {"trust_remote_code": True}
+        if QUANTIZATION == "4bit":
+            model = AutoModelForCausalLM.from_pretrained(
+                MODEL_NAME,
+                load_in_4bit=True,
+                device_map="auto",
+                **model_kwargs,
+            )
+        elif QUANTIZATION == "8bit":
+            model = AutoModelForCausalLM.from_pretrained(
+                MODEL_NAME,
+                load_in_8bit=True,
+                device_map="auto",
+                **model_kwargs,
+            )
+        else:
+            model = AutoModelForCausalLM.from_pretrained(
+                MODEL_NAME,
+                torch_dtype=torch.float16,
+                device_map="auto",
+                **model_kwargs,
+            )
+
+        _gen = pipeline(
+            "text-generation",
+            model=model,
+            tokenizer=_TOKENIZER,
+            do_sample=False,
+            temperature=0.0,
+            top_p=1.0,
+            max_new_tokens=MAX_NEW_TOKENS,
+            return_full_text=False,
+        )
+        _llm = HuggingFacePipeline(pipeline=_gen)
 
     print("[INIT] Embeddings (E5)...")
     embedding_model_name = os.getenv(

@@ -131,3 +131,5 @@ langchain-huggingface
 chonkie
 langchain_qdrant
 qdrant_client
+bitsandbytes
+llama-cpp-python
