@@ -3,6 +3,7 @@ import os
 import re
 import uuid
 
+import torch
 from chonkie import RecursiveChunker, SentenceChunker, TokenChunker
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -20,7 +21,7 @@ global_unique_hashes = set()
 
 embedding_model = E5Embeddings(
     model_name=os.getenv("EMBEDDINGS_MODEL_NAME", "intfloat/multilingual-e5-base"),
-    device="cpu",
+    device="cuda" if torch.cuda.is_available() else "cpu",  # Используем GPU при наличии
 )
 
 
