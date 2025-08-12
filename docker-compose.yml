@@ -1,12 +1,17 @@
 services:
   app:
-    build: ./app/
-    image: event-planner-api:latest
-#    env_file:
-#    - ./app/.env
+    build: ./app
+    image: qa-assistant:dev
+    ports: ["8080:8080"]
     volumes:
-      - ./app:/app
-    ports:
-      - "8080:8080"
-#    depends_on:
-#      - db
+      - ./app:/app              # монтируем код (модель внутри тоже смонтируется)
+    environment:
+      - MODEL_DIR=/models/my_model  # указываем путь к ЗАПЕЧЁННОЙ модели
+      - WATCHFILES_FORCE_POLLING=true
+#    command: >
+#      uvicorn api:app --host 0.0.0.0 --port 8080 --reload
+#      --reload-dir /app
+#      --reload-exclude models/my_model/**
+#      --reload-exclude .venv/**
+#      --reload-exclude '**/*.safetensors'
+#      --reload-exclude '**/*.bin'

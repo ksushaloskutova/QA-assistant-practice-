@@ -5,10 +5,10 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from models.index import ChatMessage
+from providers.rag.service import _EXECUTOR
+from providers.rag_service import initialize_components, query_rag
 from pydantic import BaseModel
-
-from app.models.index import ChatMessage
-from app.providers.rag_service import _EXECUTOR, initialize_components, query_rag
 
 logger = logging.getLogger(__name__)
 
@@ -43,15 +43,6 @@ async def health_check():
 
 class ChatRequest(BaseModel):
     question: str
-
-
-# @app.post("/chat/{chat_id}")
-# async def chat_endpoint(chat_id: str, request: ChatRequest):
-#     try:
-#         response = query_rag(ChatMessage(question=request.question), chat_id)
-#         return {"response": response}
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post(

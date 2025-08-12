@@ -14,8 +14,8 @@ class E5Embeddings(Embeddings):
 
     def __init__(
         self,
-        model_name: str | None = None,
-        device: str | None = None,
+        model_name: str = None,
+        device: str = None,
         query_prefix: str = "query: ",
         passage_prefix: str = "passage: ",
     ):

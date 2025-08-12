@@ -127,7 +127,11 @@ websockets==14.1
 wrapt==1.17.1
 yarl==1.18.3
 zipp==3.21.0
-langchain-huggingface
-chonkie
-langchain_qdrant
-qdrant_client
+langchain-huggingface==0.1.2
+chonkie==1.1.2
+langchain-qdrant==0.2.0
+qdrant-client==1.15.1
+pyTelegramBotAPI==4.14.0
+sentence-transformers==5.1.0
+torch==2.8.0
+transformers==4.46.3
