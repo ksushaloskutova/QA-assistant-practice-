@@ -14,6 +14,7 @@ from langchain_huggingface import HuggingFacePipeline
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from transformers import AutoTokenizer, pipeline
+from sentence_transformers import CrossEncoder
 
 from objects.model_custom_embeddings import E5Embeddings
 
@@ -49,12 +50,17 @@ _chat_history: Dict[str, List[Union[HumanMessage, AIMessage]]] = {}
 def _rag_params() -> dict:
     """Читает настройки RAG из переменных окружения на каждый запуск."""
     return {
-        "TOP_K_DOCS": int(os.getenv("RAG_TOP_K_DOCS", "2")),
-        "FETCH_K": int(os.getenv("RAG_FETCH_K", "8")),
-        "SCORE_THRESHOLD": float(os.getenv("RAG_SCORE_THRESHOLD", "0.25")),
+        "TOP_K_DOCS": int(os.getenv("RAG_TOP_K_DOCS", "4")),          # было 2
+        "FETCH_K": int(os.getenv("RAG_FETCH_K", "32")),               # было 8
+        "SCORE_THRESHOLD": float(os.getenv("RAG_SCORE_THRESHOLD", "0.0")),  # было 0.25
         "MMR_LAMBDA": float(os.getenv("RAG_MMR_LAMBDA", "0.5")),
-        "HNSW_EF": int(os.getenv("RAG_HNSW_EF", "4")),
+        "HNSW_EF": int(os.getenv("RAG_HNSW_EF", "64")),               # было 4
+        # опциональный re-rank (включить env RAG_RERANK=1)
+        "RERANK": os.getenv("RAG_RERANK", "0") == "1",
+        "RERANK_MODEL": os.getenv("RAG_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+        "RERANK_TOPN": int(os.getenv("RAG_RERANK_TOPN", "24")),
     }
+
 
 
 def _parallel_embed(texts: List[str]) -> List[List[float]]:
@@ -120,40 +126,73 @@ def _trim_docs_by_tokens(docs: List[Document], max_input_tokens: int) -> str:
 
 
 def _build_prompt(context_text: str, question: str, history_text: str) -> str:
-    """Финальный промпт-строка — дешевле, чем шаблонные цепочки."""
     sys = (
-        "Ты помощник 'AI Assistant' по поступлению в AI Talented Hub, ИТМО (направление: Искусственный интеллект). "
-        "Отвечай строго по приведённому контексту. Если ответа нет в контексте, скажи честно, что не нашёл, "
-        "и предложи переформулировать вопрос. Отвечай кратко и по делу на русском; англоязычные термины из контекста не меняй.\n\n"
+        "Ты помощник 'AI Assistant' по поступлению в AI Talented Hub ИТМО.\n"
+        "ОТВЕЧАЙ ТОЛЬКО по приведённому контексту.\n"
+        "Если точного ответа в контексте нет — честно скажи, что не нашёл, и попроси уточнить вопрос.\n"
+        "Формат ответа:\n"
+        "1) Коротко процитируй 1–3 подходящих фрагмента из контекста (в кавычках).\n"
+        "2) Дай краткий вывод на русском. Английские термины из контекста не меняй.\n\n"
     )
     parts = [sys]
     if history_text:
-        parts.append("История диалога:\n")
-        parts.append(history_text)
-        parts.append("\n\n")
-    parts.append("Контекст:\n")
-    parts.append(context_text if context_text.strip() else "(контекст пуст)")
-    parts.append("\n\nВопрос:\n")
-    parts.append(question.strip())
-    parts.append("\n\nОтвет:")
+        parts += ["История диалога:\n", history_text, "\n\n"]
+    parts += [
+        "КОНТЕКСТ:\n",
+        context_text if context_text.strip() else "(контекст пуст)\n",
+        "\nВОПРОС:\n",
+        question.strip(),
+        "\n\nОТВЕТ:\n"
+    ]
     return "".join(parts)
 
 
+
 def _format_sources(docs: List[Document]) -> str:
-    """Добавляем список источников к ответу (улучшает доверие и дебаг)."""
-    uniq = []
+    seen = set()
+    items = []
     for d in docs:
-        src = d.metadata.get("source") or d.metadata.get("file") or "unknown"
-        if src not in uniq:
-            uniq.append(src)
-        if len(uniq) == 3:
+        md = d.metadata or {}
+        src = md.get("url") or md.get("source") or md.get("file") or "unknown"
+        label = src
+        if md.get("title"):
+            label = f"{label} — {md['title']}"
+        if label not in seen:
+            items.append(f"- {label}")
+            seen.add(label)
+        if len(items) == 3:
             break
-    if not uniq:
-        return ""
-    return "\n\nИсточники:\n" + "\n".join(f"- {s}" for s in uniq)
+    return ("Источники:\n" + "\n".join(items)) if items else ""
+
+
+
+
+def _rerank_if_enabled(question: str, docs: List[Document], params: dict) -> List[Document]:
+    """Опциональный re-rank top-N кандидатов CrossEncoder'ом (вкл через RAG_RERANK=1)."""
+    if not params.get("RERANK"):
+        return docs
+    if CrossEncoder is None:
+        logger.warning("RERANK=1, но sentence-transformers не установлен; пропускаю re-rank.")
+        return docs
+    try:
+        topn = min(len(docs), params.get("RERANK_TOPN", 24))
+        if topn <= 1:
+            return docs
+        model_name = params.get("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        reranker = CrossEncoder(model_name, device=device)
+        pairs = [(question, d.page_content) for d in docs[:topn]]
+        scores = reranker.predict(pairs)
+        order = sorted(range(topn), key=lambda i: float(scores[i]), reverse=True)
+        reranked = [docs[i] for i in order] + docs[topn:]
+        return reranked
+    except Exception as e:
+        logger.warning(f"Re-rank failed: {e}")
+        return docs
 
 
 # ==================== ИНИЦИАЛИЗАЦИЯ ====================
+
 def initialize_components():
     """Инициализация всех тяжёлых частей один раз (CPU или GPU)."""
     global _initialized, _client, _vectorstore, _embedding_model, _llm, _TOKENIZER
@@ -169,9 +208,7 @@ def initialize_components():
 
     print("[INIT] Tokenizer...")
     _TOKENIZER = AutoTokenizer.from_pretrained(
-        MODEL_DIR,
-        trust_remote_code=True,
-        local_files_only=True
+        MODEL_DIR, trust_remote_code=True, local_files_only=True  # use_fast по умолчанию True
     )
 
     device = 0 if torch.cuda.is_available() else -1
@@ -215,6 +252,8 @@ def initialize_components():
         client=_client,
         collection_name=COLLECTION_NAME,
         embedding=_embedding_model,
+        content_payload_key="text",
+        metadata_payload_key=None,
     )
 
     # прогрев (best-effort)
@@ -259,7 +298,7 @@ def query_rag(message: ChatMessage, session_id: str = "") -> str:
     scored = _vectorstore.similarity_search_with_score(
         message.question,
         k=params["FETCH_K"],
-        score_threshold=params["SCORE_THRESHOLD"],
+        score_threshold=None,  # не режем заранее; отфильтруем сами
         search_params={
             "hnsw_ef": params["HNSW_EF"],
             "exact": False,
@@ -267,25 +306,40 @@ def query_rag(message: ChatMessage, session_id: str = "") -> str:
     )
     timers["search"] = time.perf_counter() - search_start
 
-    # 2) Фильтрация и fallback логика
+    # 2) Лёгкая фильтрация и fallback логика
     filter_start = time.perf_counter()
-    filtered_docs = [d for d, s in scored if s >= params["SCORE_THRESHOLD"]]
+    # фильтруем мягко: оставим всё, что не хуже порога, но если пусто — оставляем топ по скору
+    candidates = [d for d, s in scored if s is None or s >= params["SCORE_THRESHOLD"]]
+    if not candidates:
+        candidates = [d for d, _ in scored]  # пусть хоть что-то пойдёт дальше
 
-    if not filtered_docs:
-        # ИСПРАВЛЕНО: Добавлен таймаут для MMR
+    # опциональный re-rank top-N (CrossEncoder)
+    candidates = _rerank_if_enabled(message.question, candidates, params)
+
+    # если после всего кандидатов меньше TOP_K_DOCS — попробуем MMR как запасной вариант
+    if not candidates:
         try:
-            docs = _vectorstore.max_marginal_relevance_search(
+            candidates = _vectorstore.max_marginal_relevance_search(
                 message.question,
                 k=params["TOP_K_DOCS"],
                 fetch_k=params["FETCH_K"],
                 lambda_mult=params["MMR_LAMBDA"],
-                timeout=5.0,  # Максимум 5 секунд на MMR
+                timeout=5.0,
             )
         except Exception:
-            docs = []
-    else:
-        docs = filtered_docs[: params["TOP_K_DOCS"]]
+            candidates = []
+
+    # берём финальные TOP_K_DOCS
+    docs = candidates[: params["TOP_K_DOCS"]]
     timers["filter"] = time.perf_counter() - filter_start
+
+    logger.info(f"RAG: candidates={len(candidates)} final_docs={len(docs)}")
+    for i, d in enumerate(docs[:3], start=1):
+        logger.info(
+            f"[DOC{i}] len={len(d.page_content)} meta={ {k: d.metadata.get(k) for k in ['source', 'file', 'url', 'title']} }")
+
+    if not docs:
+        return "Я не нашёл ответа в базе материалов. Уточните вопрос или добавьте документы по этой теме."
 
     # 3) Подготовка контекста
     trim_start = time.perf_counter()
@@ -315,7 +369,8 @@ def query_rag(message: ChatMessage, session_id: str = "") -> str:
 
         # ИСПРАВЛЕНО: Добавлены источники только если есть ответ
         if answer:
-            answer += _format_sources(trimmed_docs)
+            answer += "\n" + _format_sources(trimmed_docs)
+
     except Exception as e:
         logger.error(f"Generation failed: {str(e)}")
         answer = "Извините, не удалось обработать запрос. Пожалуйста, попробуйте позже."

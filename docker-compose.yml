@@ -2,7 +2,8 @@ services:
   ingest:
 #    build: ./app/
     command: python -m providers.ingest
-    image: event-planner-api:latest
+    runtime: nvidia
+    image: event-planner-rag:latest
     volumes:
       - ./app:/app               # код
       - qdrant_data:/app/qdrant_db  # общие данные Qdrant
@@ -10,17 +11,15 @@ services:
       - QDRANT_PATH=/app/qdrant_db
       - MODEL_DIR=/opt/models/my_model
       - EMBEDDINGS_MODEL_NAME=/opt/embeddings/e5_base
-#    # если есть GPU:
-#    gpus: "all"
 
 
   app:
-#    build: ./app/
     command: python api.py
+    runtime: nvidia
     depends_on:
       ingest:
         condition: service_completed_successfully
-    image: event-planner-api:latest
+    image: event-planner-rag:latest
     volumes:
       - ./app:/app
       - qdrant_data:/app/qdrant_db

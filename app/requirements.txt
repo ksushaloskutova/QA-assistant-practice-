@@ -12,7 +12,14 @@ pyTelegramBotAPI==4.28.0
 pytest==8.4.1
 python-dotenv==1.1.1
 qdrant_client==1.15.1
-sentence_transformers==5.1.0
-torch==2.8.0
-transformers==4.55.0
+
+transformers==4.45.2
+tokenizers==0.20.3
+sentence-transformers==2.6.1
+accelerate==0.33.0
+safetensors>=0.4.3
+huggingface-hub>=0.23.0
+einops>=0.7.0
+sentencepiece>=0.1.99
+
 uvicorn==0.35.0

@@ -10,6 +10,8 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
+from pathlib import Path
+import json
 
 from objects.model_custom_embeddings import E5Embeddings
 
@@ -20,7 +22,7 @@ COLLECTION_NAME = "qa_documents"
 global_unique_hashes = set()
 
 embedding_model = E5Embeddings(
-    model_name=os.getenv("EMBEDDINGS_MODEL_NAME", "intfloat/multilingual-e5-base"),
+    model_name=os.getenv("EMBEDDINGS_MODEL_NAME", "/opt/embeddings/e5_base"),
     device="cuda" if torch.cuda.is_available() else "cpu",  # Используем GPU при наличии
 )
 
@@ -41,28 +43,19 @@ def preprocess_text(text: str) -> str:
 
 
 def text_to_documents(text: str, source: str) -> list[Document]:
-    blocks = text.split("\n\n")
+    # сначала нормализуем «пустые строки»
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    # режем по двойному переводу строки
+    blocks = [b.strip() for b in text.split("\n\n") if b.strip()]
+
     base_name = os.path.basename(source)
     dir_name = os.path.basename(os.path.dirname(source))
+    metadata_base = {"source": source, "file": base_name, "category": dir_name}
 
-    # Попробуем извлечь дату из текста (если она есть)
-    date_match = re.search(r'\b(\d{4}-\d{2}-\d{2})\b', text)
-    date = date_match.group(1) if date_match else None
+    docs = [Document(page_content=b, metadata=metadata_base.copy()) for b in blocks]
+    return docs
 
-    # Генерируем метадату
-    metadata_base = {
-        "source": source,
-        "file": base_name,
-        "category": dir_name,
-    }
-    if date:
-        metadata_base["date"] = date
-
-    return [
-        Document(page_content=block.strip(), metadata=metadata_base.copy())
-        for block in blocks
-        if block.strip()
-    ]
 
 
 # === Загрузка и предварительная обработка документов ===
@@ -76,10 +69,24 @@ def walk_through_files(path, file_extension='.txt'):
 def load_documents():
     documents = []
     for f_name in walk_through_files(DATA_PATH):
-        loader = TextLoader(f_name, encoding="utf-8")
-        raw = loader.load()[0].page_content
+        raw = Path(f_name).read_text(encoding="utf-8")
         cleaned = preprocess_text(raw)
+
+        # читаем метадату, если есть
+        meta = {}
+        meta_file = Path(f_name).with_suffix(".meta.json")
+        if meta_file.exists():
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            except Exception:
+                meta = {}
+
         processed_docs = text_to_documents(cleaned, source=f_name)
+        # дополняем метадату каждого документа url/title
+        for d in processed_docs:
+            d.metadata["url"] = meta.get("url")
+            d.metadata["title"] = meta.get("title")
+
         documents.extend(processed_docs)
         print(f"[LOADED] {f_name} → {len(processed_docs)} segments")
     return documents
@@ -105,7 +112,12 @@ def get_chunker(method: str):
             return RecursiveChunker()
 
     elif method == "recursive_char":
-        return RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        return RecursiveCharacterTextSplitter(
+            chunk_size=1200,     # ~250-300 токенов (примерно)
+            chunk_overlap=250,
+            separators=["\n\n", "\n", ". ", " "],
+            length_function=len,
+        )
 
     else:
         raise ValueError(f"Unknown chunking method: {method}")
@@ -143,7 +155,7 @@ def split_text(documents: list[Document], method: str):
         chunks = splitter.split_documents(documents)
     else:
         for doc in documents:
-            for chunk_text in _run_splitter(splitter, f"passage: {doc.page_content}"):
+            for chunk_text in _run_splitter(splitter, doc.page_content):
                 chunk_hash = hash_text(chunk_text)
                 if chunk_hash not in global_unique_hashes:
                     chunks.append(
@@ -158,31 +170,38 @@ def split_text(documents: list[Document], method: str):
 
 
 # === Сохранение в Qdrant ===
-def save_to_qdrant(chunks: list[Document]):
+def save_to_qdrant(chunks: list[Document], batch_size: int = 64):
+    """Сохраняем чанки в Qdrant батчами. Документы кодируем embed_documents (E5 сам добавит 'passage: ')."""
     client = QdrantClient(path=QDRANT_PATH)
 
+    # создаём коллекцию при первом запуске
     if not client.collection_exists(collection_name=COLLECTION_NAME):
         client.create_collection(
             collection_name=COLLECTION_NAME,
-            vectors_config=VectorParams(
-                size=embedding_model.dim, distance=Distance.COSINE
-            ),
+            vectors_config=VectorParams(size=embedding_model.dim, distance=Distance.COSINE),
         )
 
-    points = []
-    for doc in chunks:
-        vector = embedding_model.embed_query(doc.page_content)
-        point = PointStruct(
-            id=str(uuid.uuid4()),
-            vector=vector,
-            payload=doc.metadata | {"text": doc.page_content},
-        )
-        points.append(point)
+    total = 0
+    for i in range(0, len(chunks), batch_size):
+        batch_docs = chunks[i:i + batch_size]
+        texts = [d.page_content for d in batch_docs]  # <- сырые тексты; префикс добавит E5Embeddings
 
-    client.upsert(collection_name=COLLECTION_NAME, points=points)
-    print(
-        f"Saved {len(points)} chunks to Qdrant at {QDRANT_PATH} (collection: {COLLECTION_NAME})"
-    )
+        # эмбеддинги документов (нормализация уже внутри твоего класса)
+        vectors = embedding_model.embed_documents(texts)
+
+        points = [
+            PointStruct(
+                id=str(uuid.uuid4()),
+                vector=vec,
+                payload=doc.metadata | {"text": doc.page_content},
+            )
+            for vec, doc in zip(vectors, batch_docs)
+        ]
+
+        client.upsert(collection_name=COLLECTION_NAME, points=points)
+        total += len(points)
+
+    print(f"Saved {total} chunks to Qdrant at {QDRANT_PATH} (collection: {COLLECTION_NAME})")
 
 
 # === Финальный пайплайн ===
