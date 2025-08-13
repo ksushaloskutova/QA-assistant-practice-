@@ -2,6 +2,7 @@ import logging
 import time
 
 import uvicorn
+import re
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -44,14 +45,6 @@ async def health_check():
 class ChatRequest(BaseModel):
     question: str
 
-
-# @app.post("/chat/{chat_id}")
-# async def chat_endpoint(chat_id: str, request: ChatRequest):
-#     try:
-#         response = query_rag(ChatMessage(question=request.question), chat_id)
-#         return {"response": response}
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post(
@@ -96,7 +89,7 @@ async def chat_endpoint(chat_id: str, request: ChatRequest):
         # Парсинг ответа (если нужно выделить источники)
         sources = []
         if "Источники:" in response:
-            response, *source_lines = response.split("\n\nИсточники:")
+            response, *source_lines = re.split(r"\n{1,2}Источники:", response)
             sources = (
                 [s.strip() for s in source_lines[0].split("\n- ") if s.strip()]
                 if source_lines
