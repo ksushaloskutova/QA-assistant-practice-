@@ -7,8 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from app.models.index import ChatMessage
-from app.providers.rag_service import _EXECUTOR, initialize_components, query_rag
+from models.index import ChatMessage
+from providers.rag_service import _EXECUTOR, initialize_components, query_rag
 
 logger = logging.getLogger(__name__)
 

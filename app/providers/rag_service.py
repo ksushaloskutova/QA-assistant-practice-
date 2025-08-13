@@ -15,16 +15,17 @@ from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from transformers import AutoTokenizer, pipeline
 
-from app.objects.model_custom_embeddings import E5Embeddings
+from objects.model_custom_embeddings import E5Embeddings
 
-from ..models.index import ChatMessage
+from models.index import ChatMessage
 
 logger = logging.getLogger(__name__)
 
 
 # ==================== КОНФИГ ====================
-MODEL_DIR = "app/models/my_model"  # локальная HF-модель генерации
-QDRANT_PATH = os.path.abspath("app/qdrant_db")  # локальная папка Qdrant
+MODEL_DIR = os.getenv("MODEL_DIR", "/opt/models/my_model")  # локальная HF-модель генерации
+EMBEDDINGS_MODEL_NAME= os.getenv("EMBEDDINGS_MODEL_NAME", "/opt/embeddings/e5_base")
+QDRANT_PATH = os.getenv("QDRANT_PATH", "/app/qdrant_db")
 COLLECTION_NAME = "qa_documents"  # коллекция, созданная ingest
 
 PER_DOC_LIMIT = 400  # лимит токенов на 1 документ до склейки
@@ -167,7 +168,11 @@ def initialize_components():
         pass
 
     print("[INIT] Tokenizer...")
-    _TOKENIZER = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    _TOKENIZER = AutoTokenizer.from_pretrained(
+        MODEL_DIR,
+        trust_remote_code=True,
+        local_files_only=True
+    )
 
     device = 0 if torch.cuda.is_available() else -1
     device_name = "GPU" if device >= 0 else "CPU"
@@ -193,11 +198,9 @@ def initialize_components():
     _llm = HuggingFacePipeline(pipeline=_gen)
 
     print("[INIT] Embeddings (E5)...")
-    embedding_model_name = os.getenv(
-        "EMBEDDINGS_MODEL_NAME", "intfloat/multilingual-e5-base"
-    )
+
     _embedding_model = E5Embeddings(
-        model_name=embedding_model_name,
+        model_name=EMBEDDINGS_MODEL_NAME,
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
 

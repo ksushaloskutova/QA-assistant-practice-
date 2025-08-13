@@ -11,11 +11,11 @@ from langchain_community.document_loaders import TextLoader
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
-from app.objects.model_custom_embeddings import E5Embeddings
+from objects.model_custom_embeddings import E5Embeddings
 
 # === Константы ===
-DATA_PATH = "app/docs"
-QDRANT_PATH = "app/qdrant_db"
+DATA_PATH = os.getenv("DATA_PATH","/app/docs")
+QDRANT_PATH = os.getenv("QDRANT_PATH", "/app/qdrant_db")
 COLLECTION_NAME = "qa_documents"
 global_unique_hashes = set()
 

@@ -1,12 +1,35 @@
 services:
-  app:
-    build: ./app/
+  ingest:
+#    build: ./app/
+    command: python -m providers.ingest
     image: event-planner-api:latest
-#    env_file:
-#    - ./app/.env
+    volumes:
+      - ./app:/app               # код
+      - qdrant_data:/app/qdrant_db  # общие данные Qdrant
+    environment:
+      - QDRANT_PATH=/app/qdrant_db
+      - MODEL_DIR=/opt/models/my_model
+      - EMBEDDINGS_MODEL_NAME=/opt/embeddings/e5_base
+#    # если есть GPU:
+#    gpus: "all"
+
+
+  app:
+#    build: ./app/
+    command: python api.py
+    depends_on:
+      ingest:
+        condition: service_completed_successfully
+    image: event-planner-api:latest
     volumes:
       - ./app:/app
+      - qdrant_data:/app/qdrant_db
+    environment:
+      - QDRANT_PATH=/app/qdrant_db
+      - MODEL_DIR=/opt/models/my_model
+      - EMBEDDINGS_MODEL_NAME=/opt/embeddings/e5_base
     ports:
       - "8080:8080"
-#    depends_on:
-#      - db
+volumes:
+  qdrant_data:
+

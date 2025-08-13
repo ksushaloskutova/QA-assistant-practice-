@@ -174,3 +174,5 @@ cython_debug/
 .pypirc
 
 app/models/my_model
+app/models/e5_base/
+

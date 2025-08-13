@@ -5,7 +5,7 @@ import torch
 from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
 
-
+EMBEDDINGS_MODEL_NAME= os.getenv("EMBEDDINGS_MODEL_NAME", "/opt/embeddings/e5_base")
 class E5Embeddings(Embeddings):
     """
     Кастомный эмбеддер под E5-модель (например, intfloat/multilingual-e5-large).
@@ -20,10 +20,7 @@ class E5Embeddings(Embeddings):
         passage_prefix: str = "passage: ",
     ):
         if model_name is None:
-            model_name = os.getenv(
-                "EMBEDDINGS_MODEL_NAME", "intfloat/multilingual-e5-base"
-            )
-
+            model_name = EMBEDDINGS_MODEL_NAME
         if device is None:
             # Используем GPU, если он доступен
             device = "cuda" if torch.cuda.is_available() else "cpu"
